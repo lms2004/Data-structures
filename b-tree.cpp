@@ -1,15 +1,27 @@
-
 #include <iostream>
 #include <algorithm>    // 用于std::swap等算法操作
 #include <vector>       // 可能需要用于节点操作
 #include <queue>        // 可能需要用于层序遍历
 #include <memory>       // 若使用智能指针管理内存
 #include <stdexcept>  
+#include <random>  // 添加头文件支持 std::shuffle
 
 using namespace std;
+
+struct ValidationResult {
+    bool isValid;
+    string errorMessage;
+    int leafLevel;
+
+    ValidationResult(bool valid = true, const string& msg = "", int level = -1)
+        : isValid(valid), errorMessage(msg), leafLevel(level) {}
+};
+
+
+
 /*
 m 阶 B 树
-    1. 每个节点最多有 m-1 个关键字。
+    1. 每个节点最多有 m 个子节点  -> m-1 个关键字。
     2. 每个节点至少有 \lceil m/2 \rceil 个子节点。
     3. 根节点至少有两个子节点（除非它是叶子节点）。
     4. 所有叶子节点都在同一层。
@@ -30,14 +42,6 @@ public:
     void insertNonFull(int k);      // 非满节点插入
     void splitChild(int i, BTreeNode *y);  // 子节点分裂
     friend class BTree;
-    void collect(vector<int>& result) {
-        int i;
-        for (i = 0; i < n; i++) {
-            if (!leaf) C[i]->collect(result);
-            result.push_back(keys[i]);
-        }
-        if (!leaf) C[i]->collect(result);
-    }
 };
 
 // B树类
@@ -56,6 +60,7 @@ public:
         return (root == NULL) ? NULL : root->search(k);
     }
     void insert(int k);  // 插入入口
+    
     void printTree() {
         if (root == nullptr) {
             cout << "B-Tree is empty." << endl;
@@ -69,7 +74,7 @@ public:
         while (!q.empty()) {
             cout << "Level " << level << ": [ ";
             int size = q.size();
-            for (int i = 0; i < size; i++) {
+            for (int i = 0; i < size; i++) { // 提取每个节点子节点
                 BTreeNode* node = q.front();
                 q.pop();
                 
@@ -94,6 +99,88 @@ public:
         }
     }
 
+
+    bool validate() {
+        if (!root) {
+            cout << "✅ B-Tree 验证成功：空树合法。" << endl;
+            return true;
+        }
+        ValidationResult result = validateNode(root, 0, true);
+        if (result.isValid) {
+            cout << "✅ B-Tree 验证成功：结构合法。" << endl;
+        } else {
+            cout << "❌ 验证失败：" << result.errorMessage << endl;
+        }
+        return result.isValid;
+    }
+
+private:
+    ValidationResult validateNode(BTreeNode* node, int depth, bool isRoot) {
+        if (!node) return ValidationResult(false, "节点为 null", depth);
+
+        int minKeys = isRoot ? 1 : ((m + 1) / 2 - 1);
+        int maxKeys = m - 1;
+
+        // 检查关键字个数
+        if (node->n < minKeys || node->n > maxKeys) {
+            return ValidationResult(false,
+                "层级 " + to_string(depth) + " 的节点关键字数量不合法，当前为 " + to_string(node->n) +
+                "，应在 [" + to_string(minKeys) + ", " + to_string(maxKeys) + "] 内，节点内容: " + keysToStr(node),
+                depth);
+        }
+
+        // 检查关键字顺序
+        for (int i = 1; i < node->n; ++i) {
+            if (node->keys[i - 1] >= node->keys[i]) {
+                return ValidationResult(false,
+                    "层级 " + to_string(depth) + " 的节点关键字未升序排列，节点内容: " + keysToStr(node),
+                    depth);
+            }
+        }
+
+        if (node->leaf) {
+            return ValidationResult(true, "", depth);
+        }
+
+        // 子节点检查
+        if (node->leaf == false) {
+            for (int i = 0; i <= node->n; ++i) {
+                if (!node->C[i]) {
+                    return ValidationResult(false,
+                        "非叶子节点在第 " + to_string(depth) + " 层，存在 null 子节点，关键字内容: " + keysToStr(node),
+                        depth);
+                }
+            }
+        }
+
+        // 验证子节点
+        int expectedLeafLevel = -1;
+        for (int i = 0; i <= node->n; ++i) {
+            ValidationResult childResult = validateNode(node->C[i], depth + 1, false);
+            if (!childResult.isValid) return childResult;
+
+            if (expectedLeafLevel == -1)
+                expectedLeafLevel = childResult.leafLevel;
+            else if (expectedLeafLevel != childResult.leafLevel) {
+                return ValidationResult(false,
+                    "层级不一致：不同叶子节点不在同一层。" +
+                    to_string(expectedLeafLevel) + " vs " + to_string(childResult.leafLevel),
+                    depth);
+            }
+        }
+
+        return ValidationResult(true, "", expectedLeafLevel);
+    }
+
+    string keysToStr(BTreeNode* node) {
+        string s = "[ ";
+        for (int i = 0; i < node->n; ++i) {
+            s += to_string(node->keys[i]);
+            if (i < node->n - 1) s += ", ";
+        }
+        s += " ]";
+        return s;
+    }
 };
 
 /**
@@ -118,8 +205,13 @@ BTreeNode::BTreeNode(int _n, bool isleaf) {
     n = 0;  // 初始化关键字数量为0
 
     // 性质 1： 每个节点最多有 m-1 个关键字
-    C = new BTreeNode*[m];   // 最多 m 个子节点
-    keys = new int[m - 1];   // -> 最多 m - 1 个关键字
+    C = new BTreeNode*[m + 1];   // 最多 m 个子节点
+    keys = new int[m];   // -> 最多 m - 1 个关键字(预留一位溢出，分裂)
+    
+    // 初始化子节点指针为nullptr
+    for (int i = 0; i < m + 1; i++) {
+        C[i] = nullptr;  // 修复野指针问题
+    }
 }
 
 // 关键字搜索
@@ -200,7 +292,7 @@ void BTreeNode::insertNonFull(int k) {
         while (i >= 0 && keys[i] > k){
             i--;
         }
-        
+
         C[i+1]->insertNonFull(k);
         // 若当前节点 子节点插入后已满 -> 分裂
         if (C[i+1]->n > m - 1) {
@@ -234,8 +326,10 @@ void BTreeNode::splitChild(int i, BTreeNode *y) {
     }
     // 如果 y 不是叶子节点，将右半部分的子节点也移至新节点 z 中
     if (y->leaf == false) {
-        for (int j = 0; j < t; j++)
+        // 注意！-> 子节点 = 关键字 + 1
+        for (int j = 0; j < z->n + 1; j++){
             z->C[j] = y->C[j+t];
+        }
     }
     
     // 左半部分 [0, t-2] 保留在原节点 y 中
@@ -256,13 +350,29 @@ void BTreeNode::splitChild(int i, BTreeNode *y) {
 
 
 int main() {
-    BTree tree(3); 
-    vector<int> keys = {8, 9, 10, 11, 15, 20, 17, 25, 30, 40, 50, 60, 70, 80, 90};
-    for (int key : keys) {
-        tree.insert(key);
-        printf("insert key: %d\n", key);
-        tree.printTree();
+    BTree tree(322); 
+
+    // 生成一些测试数据
+    vector<int> keys;
+    // 生成从 0 到 999 的序列
+    for (int i = 0; i < 1001202; i++) {
+        keys.push_back(i);
     }
 
+    // 使用现代 C++ 随机引擎打乱
+    random_device rd;
+    mt19937 g(rd());
+    shuffle(keys.begin(), keys.end(), g);
+
+    // 保留前 100 个不重复的值
+    keys.resize(1001);
+
+
+    for (int key : keys) {
+        tree.insert(key);
+    }
+
+    // 添加验证调用
+    tree.validate();
     return 0;
 }
